@@ -60,7 +60,11 @@ def sort_combine_alignments(aligns):
     if idx % 4 == 0:
       header = line
       count_section = header.split('_')[0]
-      count = int(count_section.replace('>', ''))
+      try:
+        count = int(count_section.replace('>', ''))
+      except:
+        print('point a')
+        import code; code.interact(local=dict(globals(), **locals()))
     if idx % 4 == 1:
       read = line
     if idx % 4 == 2:
@@ -186,7 +190,7 @@ def detect_hdr(read, genome):
         hdr_diffs += 1
         if hdr_nt == obs_nt:
           read_hdr_match += 1
-      curr_idx += 1  
+      curr_idx += 1
   return bool(read_hdr_match == hdr_diffs)
 
 def check_matches_threshold(read, genome):
@@ -564,20 +568,45 @@ def remaster_aligns(inp_fn, data):
         q = line.strip()
 
         # Main -- Find indel category, assuming end gaps are meaningless
-        category = categorize_alignment(read, genome)
+        try:
+          category = categorize_alignment(read, genome)
+        except:
+          print('point c')
+          print(inp_fn)
+          print(f'line {i}')
+          import code; code.interact(local=dict(globals(), **locals()))
 
         if category in ['delnotatcut', 'delnotcrispr']:
           read, genome, category = shift_single_deletion(read, genome, category)
         if category in ['insnotatcut', 'insnotcrispr']:
-          try:
-            read, genome, category = shift_single_insertion(read, genome, category)
-          except:
-            import code; code.interact(local=dict(globals(), **locals()))
+          read, genome, category = shift_single_insertion(read, genome, category)
 
         alignment = [header, read, genome, q]
-        data[category] += alignment
+        # if header == '-----':
+        # if '\x00\x00\x00\x00\x00\x00' in header:
+          # print('point b')
+          # import code; code.interact(local=dict(globals(), **locals()))
+
+        if check_alignment(alignment):
+          data[category] += alignment
+
       # timer.update()
   return
+
+
+def check_alignment(alignment):
+  [header, read, genome, q] = alignment
+  if header[0] != '>':
+    return False
+  if len(alignment) != 4:
+    return False
+  if len(read) != len(genome):
+    return False
+  if len(read) != len(q):
+    return False
+
+  return True
+
 
 ##
 # qsub
@@ -592,21 +621,29 @@ def gen_qsubs():
   num_scripts = 0
   for condition in exp_design['Name']:
     exp_row = exp_design[exp_design['Name'] == condition].iloc[0]
-    lib_nm = exp_row['Library']
+    lib_nm = exp_row['Dual library']
+    # if condition[-1] == 'B':
+      # continue
     # 190625: library is test12
     # if larger, generate qsubs for subsets of library for parallelization
 
-    command = 'python %s.py %s %s %s' % (NAME, condition, 0, 11)
-    script_id = NAME.split('_')[0]
+    lib_design = pd.read_csv(_config.DATA_DIR + f'lib_{lib_nm}_design.csv')
 
-    # Write shell scripts
-    sh_fn = qsubs_dir + 'q_%s_%s_%s.sh' % (script_id, condition, 0)
-    with open(sh_fn, 'w') as f:
-      f.write('#!/bin/bash\n%s\n' % (command))
-    num_scripts += 1
+    jump = 10
+    for jdx in range(0, len(lib_design), jump):
+      start_jdx = jdx
+      end_jdx = jdx + jump
+      command = 'python %s.py %s %s %s' % (NAME, condition, start_jdx, end_jdx)
+      script_id = NAME.split('_')[0]
 
-    # Write qsub commands
-    qsub_commands.append('qsub -V -l h_rt=4:00:00,h_vmem=2G -wd %s %s &' % (_config.SRC_DIR, sh_fn))
+      # Write shell scripts
+      sh_fn = qsubs_dir + 'q_%s_%s_%s.sh' % (script_id, condition, start_jdx)
+      with open(sh_fn, 'w') as f:
+        f.write('#!/bin/bash\n%s\n' % (command))
+      num_scripts += 1
+
+      # Write qsub commands
+      qsub_commands.append('qsub -j y -P regevlab -V -l h_rt=4:00:00,h_vmem=2G -wd %s %s &' % (_config.SRC_DIR, sh_fn))
 
   # Save commands
   commands_fn = qsubs_dir + '_commands.sh'
@@ -629,14 +666,14 @@ def main(argv):
 
   # Parse condition-specific settings
   exp_row = exp_design[exp_design['Name'] == nm].iloc[0]
-  lib_nm = exp_row['Library']
+  lib_nm = exp_row['Dual library']
   target_nm = exp_row['Target']
 
   # Library design
   global lib_design
   lib_design = pd.read_csv(_config.DATA_DIR + f'lib_{lib_nm}_design.csv')
-  peptide_nms = list(set(lib_design['Name']))
-  peptide_nms = peptide_nms[start : end + 1]
+  peptide_nms = list(lib_design['Name'])
+  peptide_nms = peptide_nms[start : end]
 
   # Target 
   target_row = target_design[target_design['Target'] == target_nm].iloc[0]
@@ -659,6 +696,7 @@ def main(argv):
         continue
       inp_fn = inp_dir + '%s/%s.txt' % (split, peptide_nm)
       remaster_aligns(inp_fn, data)
+    print(peptide_nm)
     save_alignments(data, out_dir, peptide_nm)
     timer.update()
 

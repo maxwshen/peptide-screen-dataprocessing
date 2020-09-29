@@ -16,35 +16,64 @@ util.ensure_dir_exists(out_place)
 
 exp_design = pd.read_csv(_config.DATA_DIR + 'exp_design.csv')
 target_design = pd.read_csv(_config.DATA_DIR + 'lib_targets_design.csv')
+# lib_design = pd.read_csv(_config.DATA_DIR + f'lib_16_hdr_peptides_design.csv')
+
+prefix_len = 8
+suffix_len = 10
+
 lib_design = None
+prefixes = None
+peptide_nms = None
+prefix_to_peptide = None
+suffixes = None
+suffix_to_peptide = None
 
 ##
 # Support
 ##
-def find_peptide_nm(peptide_read):
+def find_peptide2_nm(read1):
   '''
-    Match first 10 nt of peptide sequence. Suitable for a small library -- consider changing for larger libraries.
   '''
-  peptide_nm = 'unmatched'
-  for idx, row in lib_design.iterrows():
-    prefix = row['Sequence'][:15]
-    if prefix in peptide_read:
-      return row['Name']
-  return peptide_nm
+  constant_region = 'GATCCTCCGCTAGA'
+  if constant_region not in read1:
+    return None, 'p2 missing constant'
+
+  peptide_seq_start_idx = read1.index(constant_region) + len(constant_region)
+  obs_suffix = read1[peptide_seq_start_idx : peptide_seq_start_idx + suffix_len]
+
+  if obs_suffix in suffix_to_peptide:
+    return suffix_to_peptide[obs_suffix], 'success'
+  else:
+    return None, 'p2 unmatched'
+
+
+def find_peptide1_nm(read2):
+  '''
+  '''
+  constant_region = 'CATGGCTAGC'
+  if constant_region not in read2:
+    return None, 'p1 missing_constant'
+
+  peptide_seq_start_idx = read2.index(constant_region) + len(constant_region)
+  obs_prefix = read2[peptide_seq_start_idx : peptide_seq_start_idx + prefix_len]
+
+  if obs_prefix in prefix_to_peptide:
+    return prefix_to_peptide[obs_prefix], 'success'
+  else:
+    return None, 'p1 unmatched'
+
 
 ##
 # Alignments
 ##
 def alignment(read, target):
   seq_align_tool = '/ahg/regevdata/projects/CRISPR-libraries/tools/seq-align/bin/needleman_wunsch'
-  
   align = subprocess.check_output(seq_align_tool + ' --match 1 --mismatch -1 --gapopen -5 --gapextend -0 --freestartgap ' + read + ' ' + target, shell = True)
-
   align = align.decode('utf-8')
   if align[-2:] == '\n\n':
     align = align[:-2]
-
   return align
+
 
 ##
 # IO
@@ -62,12 +91,16 @@ def store_alignment(alignment_buffer, peptide_nm, align_header, align, read_q):
       curr_idx += 1
 
   align_string = f'{align_header}\n{align}\n{rq}\n'
+  if align_string.count('\n') != 4:
+    import code; code.interact(local=dict(globals(), **locals()))
   alignment_buffer[peptide_nm].append(align_string)
   return
+
 
 def init_alignment_buffer():
   alignment_buffer = defaultdict(list)
   return alignment_buffer
+
 
 def flush_alignments(alignment_buffer, out_dir):
   print(f'Flushing... \n{datetime.datetime.now()}')
@@ -78,17 +111,20 @@ def flush_alignments(alignment_buffer, out_dir):
   print(f'Done flushing.\n{datetime.datetime.now()}')
   return
 
+
 def prepare_outfns(out_dir, peptide_nms):
-  for peptide_nm in peptide_nms + ['unmatched']:
-    out_fn = out_dir + f'{peptide_nm}.txt'
-    util.exists_empty_fn(out_fn)
+  for p1 in list(peptide_nms):
+    for p2 in list(peptide_nms):
+      out_fn = out_dir + f'{p1}-{p2}.txt'
+      util.exists_empty_fn(out_fn)
   return
+
 
 ##
 # Primary
 ##
 def matchmaker(nm, split):
-  print(nm, split)
+  print(split)
   stdout_fn = _config.SRC_DIR + f'nh_c_{nm}_{split}.out'
   util.exists_empty_fn(stdout_fn)
   out_dir = f'{out_place}{nm}/{split}/'
@@ -103,21 +139,32 @@ def matchmaker(nm, split):
   # Library design
   global lib_design
   lib_design = pd.read_csv(_config.DATA_DIR + f'lib_{lib_nm}_design.csv')
-  peptide_nms = list(set(lib_design['Name']))
+
+  global prefixes
+  global peptide_nms
+  global prefix_to_peptide
+  global suffixes
+  global suffix_to_peptide
+  prefixes = [s[:prefix_len] for s in lib_design['Sequence']]
+  peptide_nms = list(lib_design['Name'])
+  prefix_to_peptide = {prefix: nm for prefix, nm in zip(prefixes, peptide_nms)}
+  suffixes = [compbio.reverse_complement(s[-suffix_len:]) for s in lib_design['Sequence']]
+  suffix_to_peptide = {suffix: nm for suffix, nm in zip(suffixes, peptide_nms)}
 
   # Target 
   target_row = target_design[target_design['Target'] == target_nm].iloc[0]
   target = target_row['Sequence']
   target_strand = target_row['gRNA orientation']
 
-  read1_fn = inp_dir + f'{parent_fn}_R1_{split}.fq'
-  read2_fn = inp_dir + f'{parent_fn}_R2_{split}.fq'
+  zf_split = str(split).zfill(3)
+  read1_fn = inp_dir + f'{parent_fn}_R1_{zf_split}.fq'
+  read2_fn = inp_dir + f'{parent_fn}_R2_{zf_split}.fq'
+
+  count_stats = defaultdict(lambda: 0)
+  count_stats['Success'] = 0
 
   alignment_buffer = init_alignment_buffer()
   prepare_outfns(out_dir, peptide_nms)
-
-  quality_pass = 0
-  tot_reads = 0
 
   tot_lines = util.line_count(read1_fn)
   timer = util.Timer(total = tot_lines)
@@ -127,31 +174,46 @@ def matchmaker(nm, split):
         h1 = line1.strip()
         h2 = line2.strip()
       if i % 4 == 1:
-        # RC of l1 contains target
-        peptide_read = line1.strip()
-        peptide_nm = find_peptide_nm(peptide_read)
-
-        # l2 contains gRNA
-        target_read = line2.strip()
-        if target_strand == '-':
-          target_read = compbio.reverse_complement(target_read)
-
+        read1 = line1.strip()
+        read2 = line2.strip()
       if i % 4 == 3:
-        tot_reads += 1
         q1, q2 = line1.strip(), line2.strip()
-        peptide_q = q1
-        read_q = q2
+        count_stats['Read count'] += 1
 
         qs = [ord(s)-33 for s in q1 + q2]
-        if np.mean(qs) >= 30:
-          quality_pass += 1
+        if np.mean(qs) < 25:
+          count_stats['1a. Quality fail'] += 1
+          continue
 
-          # Run alignment and store in buffer
-          align_header = f'>1_{peptide_read}'
-          align = alignment(target_read, target)
-          store_alignment(alignment_buffer, peptide_nm, align_header, align, read_q)
+        res, msg = find_peptide1_nm(read2)
+        if res is None:
+          count_stats[f'2{msg}'] += 1
+          continue
+        p1_nm = res
 
-      if i % int(tot_lines / 200) == 1 and i > 1:
+        res, msg = find_peptide2_nm(read1)
+        if res is None:
+          count_stats[f'2{msg}'] += 1
+          continue
+        p2_nm = res
+
+        peptide_nm = f'{p1_nm}-{p2_nm}'
+
+        read1 = read1[6:]
+        q1 = q1[6:]
+        if target_strand == '-':
+          read1 = compbio.reverse_complement(read1)
+          q1 = q1[::-1]
+
+        # Run alignment and store in buffer
+        align_header = f'>1'
+        align = alignment(read1, target)
+        store_alignment(alignment_buffer, peptide_nm, align_header, align, q1)
+        count_stats['Success'] += 1
+
+      # flush_interval = 2000
+      flush_interval = 200
+      if i % int(tot_lines / flush_interval) == 1 and i > 1:
         # Flush alignment buffer
         flush_alignments(alignment_buffer, out_dir)
         alignment_buffer = init_alignment_buffer()
@@ -160,13 +222,63 @@ def matchmaker(nm, split):
         with open(stdout_fn, 'a') as outf:
           outf.write(f'Time: {datetime.datetime.now()}\n')
           outf.write(f'Progress: {i / int(tot_lines / 100)}\n')
-          outf.write(f'Frac. quality passing: {(quality_pass / tot_reads)}\n')
+          outf.write(f'Line: {i}\n')
+          for key in sorted(list(count_stats.keys())):
+            outf.write(f'{key}, {count_stats[key]}\n')
+        # break
 
       timer.update()
   
   # Final flush
   flush_alignments(alignment_buffer, out_dir)
 
+  stats_df = pd.DataFrame(count_stats, index = [0])
+  sorted_cols = sorted([s for s in stats_df.columns])
+  stats_df = stats_df[sorted_cols]
+  stats_df.to_csv(out_dir + f'stats_{nm}_{split}.csv')
+
+  return
+
+
+##
+# qsub
+##
+def gen_qsubs():
+  # Generate qsub shell scripts and commands for easy parallelization
+  print('Generating qsub scripts...')
+  qsubs_dir = _config.QSUBS_DIR + NAME + '/'
+  util.ensure_dir_exists(qsubs_dir)
+  qsub_commands = []
+
+  num_scripts = 0
+  
+  for nm in exp_design['Name']:
+    for idx in range(0, _config.num_splits):
+
+      command = 'python %s.py %s %s' % (NAME, nm, idx)
+      script_id = NAME.split('_')[0]
+
+      is_done = os.path.isfile(out_place + f'{nm}/{idx}/stats_{nm}_{idx}.csv')
+      if is_done:
+        continue
+
+      # Write shell scripts
+      sh_fn = qsubs_dir + 'q_%s_%s_%s.sh' % (script_id, nm, idx)
+      with open(sh_fn, 'w') as f:
+        f.write('#!/bin/bash\n%s\n' % (command))
+      num_scripts += 1
+
+      # Write qsub commands
+      qsub_commands.append('qsub -j y -P regevlab -V -l h_rt=8:00:00 -wd %s %s &' % (_config.SRC_DIR, sh_fn))
+
+  # Save commands
+  commands_fn = qsubs_dir + '_commands.sh'
+  with open(commands_fn, 'w') as f:
+    f.write('\n'.join(qsub_commands))
+
+  subprocess.check_output('chmod +x %s' % (commands_fn), shell = True)
+
+  print('Wrote %s shell scripts to %s' % (num_scripts, qsubs_dir))
   return
 
 

@@ -1,12 +1,8 @@
-import sys
+import sys, os
 
-PRJ_DIR = '/ahg/regevdata/projects/CRISPR-libraries/prj/rich-peptide_screen/'  
-SRC_DIR = PRJ_DIR + 'src/'
+SRC_DIR = os.path.dirname(os.path.realpath(__file__)) + '/'
+PRJ_DIR = '/'.join(SRC_DIR.split('/')[:-2]) + '/'
 
-# toy = True
-toy = False
-if toy:
-  PRJ_DIR += 'toy/'
 #######################################################
 # Note: Directories should end in / always
 #######################################################
@@ -17,14 +13,11 @@ QSUBS_DIR = PRJ_DIR + 'qsubs/'
 #######################################################
 #######################################################
 
-CLEAN = False       # Values = 'ask', True, False
-
 # which data are we using? import that data's parameters
 # DATA_FOLD = 'rename_me/'
 DATA_FOLD = ''
 
 sys.path.insert(0, DATA_DIR + DATA_FOLD)
-import _dataconfig as d
 print('Using data folder:\n', DATA_DIR + DATA_FOLD)
 DATA_DIR += DATA_FOLD
 OUT_PLACE += DATA_FOLD
@@ -35,3 +28,4 @@ QSUBS_DIR += DATA_FOLD
 # Project-specific parameters
 #######################################################
 
+num_splits = 50

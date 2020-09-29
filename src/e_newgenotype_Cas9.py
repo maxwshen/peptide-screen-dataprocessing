@@ -231,14 +231,15 @@ def genotype_data(inp_dir, out_dir, nm, start, end):
 
   # Parse condition-specific settings
   exp_row = exp_design[exp_design['Name'] == nm].iloc[0]
-  lib_nm = exp_row['Library']
+  lib_nm = exp_row['Dual library']
   target_nm = exp_row['Target']
 
   # Library design
   global lib_design
   lib_design = pd.read_csv(_config.DATA_DIR + f'lib_{lib_nm}_design.csv')
-  peptide_nms = list(set(lib_design['Name']))
-  peptide_nms = peptide_nms[start : end + 1]
+  peptide_nms = list(lib_design['Name'])
+  peptide_nms = peptide_nms[start : end]
+  print(peptide_nms)
 
   # Target 
   target_row = target_design[target_design['Target'] == target_nm].iloc[0]
@@ -247,12 +248,12 @@ def genotype_data(inp_dir, out_dir, nm, start, end):
   crispr_cutsite = int(target_row['Cutsite index'])
 
   master_df = pd.DataFrame()
+  master_d = dict()
 
   timer = util.Timer(total = len(peptide_nms))
   for peptide_nm in peptide_nms:
     peptide_fn = inp_dir + f'{peptide_nm}.txt'
-    if not os.path.isfile(peptide_fn):
-      return
+    if not os.path.isfile(peptide_fn): continue
 
     count_dd = defaultdict(lambda: 0)
     ins_dd = defaultdict(list)
@@ -302,12 +303,20 @@ def genotype_data(inp_dir, out_dir, nm, start, end):
     ins_df = pd.DataFrame(ins_dd)
     del_df = pd.DataFrame(del_dd)
 
+    fdf = count_df.append(ins_df, ignore_index = True, sort = False)
+    fdf = fdf.append(del_df, ignore_index = True, sort = False)
+    master_d[peptide_nm] = fdf
+
     for df in [del_df, ins_df, count_df]:
       master_df = master_df.append(df, ignore_index = True, sort = False)
 
     timer.update()
 
   master_df.to_csv(out_dir + '%s_genotypes_%s.csv' % (nm, start))
+
+  with open(out_dir + f'{nm}_genotypes_{start}.pkl', 'wb') as f:
+    pickle.dump(master_d, f)
+
   return
 
 ##
@@ -323,21 +332,24 @@ def gen_qsubs():
   num_scripts = 0
   for condition in exp_design['Name']:
     exp_row = exp_design[exp_design['Name'] == condition].iloc[0]
-    lib_nm = exp_row['Library']
-    # 190625: library is test12
-    # if larger, generate qsubs for subsets of library for parallelization
+    lib_nm = exp_row['Dual library']
+    lib_design = pd.read_csv(_config.DATA_DIR + f'lib_{lib_nm}_design.csv')
 
-    command = 'python %s.py %s %s %s' % (NAME, condition, 0, 11)
-    script_id = NAME.split('_')[0]
+    jump = 150
+    for jdx in range(0, len(lib_design), jump):
+      start_jdx = jdx
+      end_jdx = jdx + jump
+      command = 'python %s.py %s %s %s' % (NAME, condition, start_jdx, end_jdx)
+      script_id = NAME.split('_')[0]
 
-    # Write shell scripts
-    sh_fn = qsubs_dir + 'q_%s_%s_%s.sh' % (script_id, condition, 0)
-    with open(sh_fn, 'w') as f:
-      f.write('#!/bin/bash\n%s\n' % (command))
-    num_scripts += 1
+      # Write shell scripts
+      sh_fn = qsubs_dir + 'q_%s_%s_%s.sh' % (script_id, condition, start_jdx)
+      with open(sh_fn, 'w') as f:
+        f.write('#!/bin/bash\n%s\n' % (command))
+      num_scripts += 1
 
-    # Write qsub commands
-    qsub_commands.append('qsub -V -l h_rt=4:00:00,h_vmem=2G -wd %s %s &' % (_config.SRC_DIR, sh_fn))
+      # Write qsub commands
+      qsub_commands.append('qsub -j y -P regevlab -V -l h_rt=4:00:00,h_vmem=2G -wd %s %s &' % (_config.SRC_DIR, sh_fn))
 
   # Save commands
   commands_fn = qsubs_dir + '_commands.sh'
